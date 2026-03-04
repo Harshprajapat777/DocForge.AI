@@ -29,3 +29,6 @@ pydantic==2.7.1
 nest_asyncio==1.6.0
 pandas==2.2.2
 tabulate==0.9.0
+
+# NumPy — pin <2.0 for chromadb 0.4.x compatibility (np.float_ removed in 2.0)
+numpy>=1.24,<2.0
