@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InsightForge.AI — Cyber Ireland 2022</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles/home.css" />
+</head>
+<body>
+
+  <!-- ── HEADER ──────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="brand">
+        <div class="logo-wrap">
+          <img src="/logo/InsightAI.jpg" alt="InsightForge.AI Logo" class="logo-img" />
+        </div>
+        <div class="brand-text">
+          <h1 class="brand-name">InsightForge<span class="accent">.AI</span></h1>
+          <p class="brand-sub">Cyber Ireland 2022 &mdash; Autonomous Intelligence System</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="status-pill">
+          <span class="status-dot"></span>
+          <span>Agent Live</span>
+        </div>
+        <a href="/docs" target="_blank" class="docs-link">API Docs</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── MAIN LAYOUT ─────────────────────────────────────────────── -->
+  <div class="layout">
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <p class="sidebar-label">Suggested Queries</p>
+
+      <button class="chip" onclick="setQuery('What is the total number of jobs reported, and where exactly is this stated?')">
+        <span class="chip-icon">&#128203;</span>
+        Total jobs reported &amp; source citation
+      </button>
+
+      <button class="chip" onclick="setQuery('Compare the concentration of Pure-Play cybersecurity firms in the South-West against the National Average.')">
+        <span class="chip-icon">&#128202;</span>
+        Pure-Play: South-West vs National Average
+      </button>
+
+      <button class="chip" onclick="setQuery('Based on our 2022 baseline and the stated 2030 job target, what is the required compound annual growth rate (CAGR) to hit that goal?')">
+        <span class="chip-icon">&#128200;</span>
+        CAGR to reach 2030 job target
+      </button>
+
+      <div class="sidebar-divider"></div>
+      <p class="sidebar-label">Powered By</p>
+
+      <div class="stack-badge"><span class="dot-cyan"></span> GPT-4o</div>
+      <div class="stack-badge"><span class="dot-purple"></span> LlamaParse</div>
+      <div class="stack-badge"><span class="dot-green"></span> ChromaDB</div>
+      <div class="stack-badge"><span class="dot-orange"></span> text-embedding-3-small</div>
+    </aside>
+
+    <!-- CHAT PANEL -->
+    <main class="chat-panel">
+
+      <!-- Welcome state -->
+      <div class="welcome" id="welcome">
+        <div class="welcome-icon">&#129302;</div>
+        <h2 class="welcome-title">Ask me anything about the report</h2>
+        <p class="welcome-sub">I can find exact figures, compare regional data, and calculate projections — all with verifiable citations.</p>
+      </div>
+
+      <!-- Messages -->
+      <div class="messages" id="messages"></div>
+
+      <!-- Input -->
+      <div class="input-bar">
+        <div class="input-wrap">
+          <textarea
+            id="queryInput"
+            class="query-input"
+            placeholder="Ask a question about the Cyber Ireland 2022 Report..."
+            rows="1"
+            onkeydown="handleKey(event)"
+            oninput="autoResize(this)"
+          ></textarea>
+          <button class="send-btn" id="sendBtn" onclick="sendQuery()" title="Send (Enter)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+        <p class="input-hint">Press <kbd>Enter</kbd> to send &nbsp;&middot;&nbsp; <kbd>Shift+Enter</kbd> for new line</p>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="/static/Main.js"></script>
+</body>
+</html>
