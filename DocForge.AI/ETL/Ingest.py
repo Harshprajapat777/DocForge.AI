@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
 """
-ETL Pipeline - InsightForge.AI
+ETL Pipeline - DocForge.AI
 ================================
-Extracts text + tables from Cyber Ireland 2022 PDF.
-  • Text   -> chunked (400t / 50t overlap) -> embedded -> ChromaDB
-  • Tables -> cleaned + structured         -> tables.json
+Full PDF extraction via LlamaParse (cloud, AI-powered markdown).
+  • Text   -> LlamaParse markdown -> chunked -> embedded -> ChromaDB
+  • Tables -> LlamaParse markdown -> parsed  -> tables.json
 """
 
 import os
 import sys
 import json
 import io
+import re
 from pathlib import Path
 
 # Force UTF-8 output on Windows (avoids cp1252 UnicodeEncodeError)
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 from dotenv import load_dotenv
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-BASE_DIR   = Path(__file__).parent.parent          # InsightForge.AI/
-ROOT_DIR   = BASE_DIR.parent                       # InsightForgeAI/
+BASE_DIR   = Path(__file__).parent.parent          # DocForge.AI/
+ROOT_DIR   = BASE_DIR.parent                       # repo root
 PDF_PATH   = BASE_DIR / "data" / "Report-Cyber-Ireland-2022.pdf"
 CHROMA_DIR = BASE_DIR / "chromaDB"
 TABLES_OUT = BASE_DIR / "data" / "tables.json"
@@ -29,12 +33,17 @@ TABLES_OUT = BASE_DIR / "data" / "tables.json"
 load_dotenv(ROOT_DIR / ".env")
 
 # ── Validate env ──────────────────────────────────────────────────────────────
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY")
+LLAMA_PARSE_KEY = os.getenv("llama_parser_key")
+
 if not OPENAI_API_KEY:
     print("ERROR: OPENAI_API_KEY is not set in .env")
     sys.exit(1)
+if not LLAMA_PARSE_KEY:
+    print("ERROR: llama_parser_key is not set in .env")
+    sys.exit(1)
 
-import pdfplumber
+from llama_parse import LlamaParse
 from llama_index.core import Document, VectorStoreIndex, StorageContext, Settings
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.openai import OpenAIEmbedding
@@ -49,106 +58,145 @@ COLLECTION    = "cyber_ireland_2022"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 - Text Extraction
+# STEP 1 - Full PDF extraction via LlamaParse
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_text_documents(pdf_path: Path) -> list:
+def parse_pdf_with_llamaparse(pdf_path: Path) -> list:
     """
-    Extract page-level text as LlamaIndex Documents.
-    Each Document carries metadata: page_number, source.
+    Send PDF to LlamaParse cloud API.
+    Returns list of raw LlamaParse Documents (one per page, markdown text).
+    Result is cached in memory and reused by both text + table extraction.
     """
+    print("      -> Sending PDF to LlamaParse API ...")
+    parser = LlamaParse(
+        api_key=LLAMA_PARSE_KEY,
+        result_type="markdown",   # AI-parsed markdown: preserves structure, tables, headers
+        verbose=False,
+        language="en",
+    )
+    raw_docs = parser.load_data(str(pdf_path))
+    print(f"      -> LlamaParse returned {len(raw_docs)} pages")
+    return raw_docs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2 - Build LlamaIndex Documents from parsed pages
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_text_documents(raw_docs: list) -> list:
+    """
+    Convert LlamaParse raw docs into LlamaIndex Documents for embedding.
+    Metadata: page_number, source.
+    """
+    total     = len(raw_docs)
     documents = []
-    with pdfplumber.open(pdf_path) as pdf:
-        total = len(pdf.pages)
-        for page_num, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text()
-            if not text or len(text.strip()) < 30:
-                continue
-            documents.append(
-                Document(
-                    text=text.strip(),
-                    metadata={
-                        "page_number": page_num,
-                        "source": f"Cyber Ireland 2022 Report - Page {page_num}",
-                        "total_pages": total,
-                    },
-                )
+    for i, doc in enumerate(raw_docs, start=1):
+        page_num = int(doc.metadata.get("page_label", i))
+        text     = doc.text.strip() if doc.text else ""
+        if len(text) < 30:
+            continue
+        documents.append(
+            Document(
+                text=text,
+                metadata={
+                    "page_number": page_num,
+                    "source":      f"Cyber Ireland 2022 Report - Page {page_num}",
+                    "total_pages": total,
+                },
             )
+        )
     return documents
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 - Table Extraction
+# STEP 3 - Parse markdown tables from LlamaParse output -> structured JSON
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _clean_row(row: list) -> list:
-    """Strip whitespace and replace None cells with empty string."""
-    return [str(cell).strip() if cell is not None else "" for cell in row]
-
-
-def _get_title_above_table(page, table_bbox: tuple) -> str:
+def _parse_markdown_table(block: str) -> dict | None:
     """
-    Find the text line immediately above a table using its bounding box.
-    table_bbox = (x0, top, x1, bottom)
+    Parse a single markdown table block into headers + rows dict.
+    Returns None if the block is not a valid table.
     """
-    table_top = table_bbox[1]
-    words = page.extract_words()
-    # Words whose bottom edge sits above the table top
-    above = [w for w in words if w["bottom"] <= table_top]
-    if not above:
-        return ""
-    # Sort by vertical position, take the last (closest) line
-    above.sort(key=lambda w: w["top"])
-    closest_y = above[-1]["top"]
-    line_words = [w for w in above if abs(w["top"] - closest_y) < 6]
-    line_words.sort(key=lambda w: w["x0"])
-    return " ".join(w["text"] for w in line_words)
+    lines = [l.strip() for l in block.strip().splitlines() if l.strip()]
+    # Need at least: header row + separator row + one data row
+    table_lines = [l for l in lines if l.startswith("|")]
+    if len(table_lines) < 3:
+        return None
+
+    def split_row(line: str) -> list:
+        return [cell.strip() for cell in line.strip("|").split("|")]
+
+    header_line = table_lines[0]
+    sep_line    = table_lines[1]
+
+    # Validate separator row (e.g. |---|---|)
+    if not re.match(r"^\|[\s\-:|]+\|", sep_line):
+        return None
+
+    headers  = split_row(header_line)
+    data_rows = [split_row(l) for l in table_lines[2:]]
+    # Drop fully empty rows
+    data_rows = [r for r in data_rows if any(c for c in r)]
+
+    if not headers or not data_rows:
+        return None
+
+    return {"headers": headers, "rows": data_rows}
 
 
-def extract_tables(pdf_path: Path) -> list:
+def extract_tables_from_llamaparse(raw_docs: list) -> list:
     """
-    Extract all tables from PDF using pdfplumber's find_tables() API.
-    Returns a list of structured dicts with page, title, headers, rows.
+    Extract and structure all markdown tables from LlamaParse output.
+    Returns list of dicts: {page, table_index, title, headers, rows}.
     """
     all_tables = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages, start=1):
-            found = page.find_tables()
-            if not found:
+
+    for i, doc in enumerate(raw_docs, start=1):
+        page_num = int(doc.metadata.get("page_label", i))
+        text     = doc.text or ""
+
+        # Split page text into blocks; look for markdown table blocks
+        # A table block = consecutive lines starting with '|'
+        blocks      = []
+        current     = []
+        prev_title  = ""
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("|"):
+                current.append(stripped)
+            else:
+                if current:
+                    blocks.append((prev_title.strip(), "\n".join(current)))
+                    current = []
+                # Track last non-empty, non-table line as potential title
+                if stripped and not stripped.startswith("#"):
+                    prev_title = stripped
+                elif stripped.startswith("#"):
+                    prev_title = stripped.lstrip("#").strip()
+
+        if current:
+            blocks.append((prev_title.strip(), "\n".join(current)))
+
+        for t_idx, (title, block) in enumerate(blocks):
+            parsed = _parse_markdown_table(block)
+            if not parsed:
                 continue
-
-            for t_idx, table_obj in enumerate(found):
-                raw = table_obj.extract()
-                if not raw or len(raw) < 2:
-                    continue
-
-                # Clean rows, drop fully-empty rows
-                cleaned = [_clean_row(row) for row in raw]
-                cleaned = [r for r in cleaned if any(c for c in r)]
-                if len(cleaned) < 2:
-                    continue
-
-                headers = cleaned[0]
-                rows    = cleaned[1:]
-
-                # Attempt to find the table's descriptive title
-                title = _get_title_above_table(page, table_obj.bbox)
-                if not title:
-                    title = f"Table {t_idx + 1} (Page {page_num})"
-
-                all_tables.append({
-                    "page":        page_num,
-                    "table_index": t_idx,
-                    "title":       title,
-                    "headers":     headers,
-                    "rows":        rows,
-                })
+            if not title:
+                title = f"Table {t_idx + 1} (Page {page_num})"
+            all_tables.append({
+                "page":        page_num,
+                "table_index": t_idx,
+                "title":       title,
+                "headers":     parsed["headers"],
+                "rows":        parsed["rows"],
+            })
 
     return all_tables
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 - Embed + Store in ChromaDB
+# STEP 4 - Embed + Store in ChromaDB
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_chroma_store():
@@ -156,30 +204,29 @@ def build_chroma_store():
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
 
-    # Clean slate on every ingest run
     try:
         client.delete_collection(COLLECTION)
         print(f"      -> Dropped existing collection '{COLLECTION}'")
     except Exception:
         pass
 
-    collection    = client.get_or_create_collection(COLLECTION)
-    vector_store  = ChromaVectorStore(chroma_collection=collection)
-    storage_ctx   = StorageContext.from_defaults(vector_store=vector_store)
+    collection   = client.get_or_create_collection(COLLECTION)
+    vector_store = ChromaVectorStore(chroma_collection=collection)
+    storage_ctx  = StorageContext.from_defaults(vector_store=vector_store)
     return vector_store, storage_ctx
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 - Validation (quick retrieval smoke-test)
+# STEP 5 - Validation (smoke-test retrieval)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def validate(index, embed_model):
     """Run a quick retrieval test to confirm the index is working."""
     Settings.embed_model = embed_model
     retriever = index.as_retriever(similarity_top_k=3)
-    nodes = retriever.retrieve("total number of jobs cybersecurity Ireland")
+    nodes     = retriever.retrieve("total number of jobs cybersecurity Ireland")
 
-    print(f"\n  Smoke-test - query: 'total number of jobs cybersecurity Ireland'")
+    print(f"\n  Smoke-test — query: 'total number of jobs cybersecurity Ireland'")
     for i, node in enumerate(nodes, 1):
         pg      = node.metadata.get("page_number", "?")
         preview = node.text[:140].replace("\n", " ")
@@ -194,29 +241,33 @@ def validate(index, embed_model):
 def ingest(pdf_path: Path) -> None:
     sep = "=" * 60
     print(f"\n{sep}")
-    print(f"  InsightForge.AI - ETL Pipeline")
+    print(f"  DocForge.AI - ETL Pipeline")
     print(f"{sep}")
     print(f"  PDF    : {pdf_path.name}")
+    print(f"  Parser : LlamaParse (full PDF — text + tables)")
     print(f"  Embed  : {EMBED_MODEL}")
     print(f"  Chunk  : {CHUNK_SIZE} tokens  |  Overlap: {CHUNK_OVERLAP} tokens")
-    print(f"  top_k  : 8 (no reranker - single PDF corpus)")
     print(f"{sep}\n")
 
-    # 1. Text
-    print("[1/4] Extracting text ...")
-    documents = extract_text_documents(pdf_path)
+    # 1. Parse entire PDF via LlamaParse (single API call)
+    print("[1/5] Parsing full PDF via LlamaParse ...")
+    raw_docs = parse_pdf_with_llamaparse(pdf_path)
+
+    # 2. Build text documents
+    print("[2/5] Building text documents ...")
+    documents = build_text_documents(raw_docs)
     print(f"      -> {len(documents)} pages with content")
 
-    # 2. Tables
-    print("[2/4] Extracting tables ...")
-    tables = extract_tables(pdf_path)
+    # 3. Extract tables from markdown
+    print("[3/5] Extracting tables from LlamaParse markdown ...")
+    tables = extract_tables_from_llamaparse(raw_docs)
     TABLES_OUT.parent.mkdir(parents=True, exist_ok=True)
     with open(TABLES_OUT, "w", encoding="utf-8") as f:
         json.dump(tables, f, indent=2, ensure_ascii=False)
     print(f"      -> {len(tables)} tables  ->  saved to {TABLES_OUT.name}")
 
-    # 3. Embed + Store
-    print("[3/4] Embedding and storing in ChromaDB ...")
+    # 4. Embed + store in ChromaDB
+    print("[4/5] Embedding and storing in ChromaDB ...")
     embed_model = OpenAIEmbedding(model=EMBED_MODEL, api_key=OPENAI_API_KEY)
 
     Settings.embed_model = embed_model
@@ -224,8 +275,7 @@ def ingest(pdf_path: Path) -> None:
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
     )
-    # Suppress LLM warnings - ETL doesn't need one
-    Settings.llm = None
+    Settings.llm = None   # ETL does not need an LLM
 
     _, storage_ctx = build_chroma_store()
 
@@ -235,11 +285,10 @@ def ingest(pdf_path: Path) -> None:
         show_progress=True,
     )
 
-    # 4. Validate
-    print("[4/4] Validating ...")
+    # 5. Smoke-test
+    print("[5/5] Validating ...")
     validate(index, embed_model)
 
-    # Summary
     print(f"\n{sep}")
     print(f"  ETL Complete")
     print(f"{sep}")
