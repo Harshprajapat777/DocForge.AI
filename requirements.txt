@@ -1,7 +1,6 @@
 # PDF Parsing
 pdfplumber==0.10.3
 pymupdf==1.23.8
-llama-parse==0.4.9
 
 # LlamaIndex Core
 llama-index-core==0.10.40
